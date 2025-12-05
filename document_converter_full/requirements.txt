@@ -1,0 +1,11 @@
+pymupdf
+pdf2image
+pillow
+pytesseract
+easyocr
+opencv-python-headless
+python-docx
+python-pptx
+pandas
+pyspellchecker
+streamlit
