@@ -9,3 +9,5 @@ python-pptx
 pandas
 pyspellchecker
 streamlit
+pdfminer.six
+opencv-python-headless
