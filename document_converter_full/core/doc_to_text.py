@@ -7,7 +7,30 @@ and two OCR engines (pytesseract & easyocr) with word-level merging by confidenc
 
 Author: ChatGPT (GPT-5 Thinking mini) — revised
 """
+# near top of core/doc_to_text.py — add these imports if not present
+import shutil
+# existing imports: Path, PIL, pytesseract, easyocr, etc.
 
+# determine whether Tesseract binary is present in PATH
+TESSERACT_AVAILABLE = shutil.which("tesseract") is not None
+
+# EasyOCR availability (you may already have this variable)
+try:
+    import easyocr
+    HAS_EASYOCR = True
+except Exception:
+    easyocr = None
+    HAS_EASYOCR = False
+
+# create reader lazily
+_reader_easyocr = None
+def get_easyocr_reader():
+    global _reader_easyocr
+    if not HAS_EASYOCR:
+        return None
+    if _reader_easyocr is None:
+        _reader_easyocr = easyocr.Reader(['en'], gpu=False)
+    return _reader_easyocr
 import os
 import sys
 import re
@@ -188,35 +211,61 @@ def pdf_to_images(path: Path, dpi: int = 300) -> List[Image.Image]:
 
 def extract_text_by_ocr_from_image(img: Image.Image) -> Tuple[str, float]:
     """
-    Run both Tesseract & EasyOCR on a PIL image; merge by word confidences.
+    Run OCR on a PIL image using:
+      1) pytesseract if tesseract binary available
+      2) easyocr if tesseract missing but EasyOCR installed
+      3) else raise RuntimeError with a clear message for the caller
     Returns (text, avg_confidence)
     """
+    # Preprocess
     prep = preprocess_image_for_ocr(img)
-    try:
-        t_words = ocr_pytesseract_with_conf(prep)
-    except Exception:
-        t_words = []
-    try:
-        e_words = ocr_easyocr_with_conf(prep)
-    except Exception:
-        e_words = []
 
-    if not t_words and not e_words:
-        raw = pytesseract.image_to_string(prep)
-        words = [w for w in re.split(r'\s+', raw.strip()) if w]
-        avg_conf = 0.0
-        return words_to_text(words), avg_conf
-    if not t_words:
-        merged_words = [w for w, _ in e_words]
-        avg_conf = float(np.mean([c for _, c in e_words])) if e_words else 0.0
-        return words_to_text(merged_words), avg_conf
-    if not e_words:
-        merged_words = [w for w, _ in t_words]
-        avg_conf = float(np.mean([c for _, c in t_words])) if t_words else 0.0
+    # If tesseract binary exists -> use both pytesseract + easyocr (if available) and merge
+    if TESSERACT_AVAILABLE:
+        try:
+            t_words = ocr_pytesseract_with_conf(prep)
+        except Exception:
+            t_words = []
+        try:
+            e_words = ocr_easyocr_with_conf(prep)
+        except Exception:
+            e_words = []
+        # same merging logic as before
+        if not t_words and not e_words:
+            raw = pytesseract.image_to_string(prep)
+            words = [w for w in re.split(r'\s+', raw.strip()) if w]
+            return words_to_text(words), 0.0
+        if not t_words:
+            merged_words = [w for w, _ in e_words]
+            avg_conf = float(np.mean([c for _, c in e_words])) if e_words else 0.0
+            return words_to_text(merged_words), avg_conf
+        if not e_words:
+            merged_words = [w for w, _ in t_words]
+            avg_conf = float(np.mean([c for _, c in t_words])) if t_words else 0.0
+            return words_to_text(merged_words), avg_conf
+        merged_words, avg_conf = merge_word_lists_by_conf(t_words, e_words)
         return words_to_text(merged_words), avg_conf
 
-    merged_words, avg_conf = merge_word_lists_by_conf(t_words, e_words)
-    return words_to_text(merged_words), avg_conf
+    # If no tesseract binary, but EasyOCR installed, use EasyOCR alone
+    if HAS_EASYOCR:
+        reader = get_easyocr_reader()
+        if reader is None:
+            # unexpected: easyocr import succeeded earlier but creating reader failed
+            raise RuntimeError("EasyOCR could not be initialized on this host.")
+        try:
+            e_words = ocr_easyocr_with_conf(prep)
+            merged_words = [w for w, _ in e_words]
+            avg_conf = float(np.mean([c for _, c in e_words])) if e_words else 0.0
+            return words_to_text(merged_words), avg_conf
+        except Exception as ex:
+            raise RuntimeError(f"EasyOCR failed: {ex}")
+
+    # Neither tesseract nor EasyOCR available — tell caller to use Docker or install Tesseract
+    raise RuntimeError(
+        "Tesseract binary not found in PATH and EasyOCR is not installed on this host. "
+        "Image / scanned-PDF OCR is unavailable. To enable full OCR, either install Tesseract on the server "
+        "or deploy using the provided Dockerfile (which installs tesseract & poppler). See README for details."
+    )
 
 
 def extract_text_from_pdf_with_mixed_strategy(path: Path) -> Tuple[str, float]:
